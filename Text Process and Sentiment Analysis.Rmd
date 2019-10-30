@@ -1,0 +1,221 @@
+---
+title: "Text Cleanup and Sentiment Analysis"
+author: "Media Data Science"
+date: "10/23/2019"
+output: html_document
+---
+
+##Data Collection 
+
+For now, we manually extracted the comments to each twitter post. This data collection method is okay for this smaller ad hoc request, but long term, we want to use the twitter API to collect tweets and all the attributes belonging to tweets. 
+
+```{r warning=FALSE, message=FALSE}
+library(readxl)
+twitter_comments <- read_excel("C:/Users/traveler/Desktop/Results/senitment/twitter_comments.xlsx")
+twitter_comments$ID <- seq.int(nrow(twitter_comments))
+head(twitter_comments)
+```
+
+
+##Text Processing 
+
+Bring in text processing packages
+```{r warning=FALSE, message=FALSE}
+#install.packages(c('tm', 'SnowballC', 'wordcloud', 'topicmodels'))
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(topicmodels)
+```
+
+Proccess text 
+```{r warning=FALSE, message=FALSE}
+
+#convert the comments into a corpus 
+corpus = Corpus(VectorSource(twitter_comments$comment))
+
+#make all characters lowercase
+corpus = tm_map(corpus, content_transformer(tolower))
+
+#remove numbers
+corpus = tm_map(corpus, removeNumbers)
+
+#remove punctuation
+corpus = tm_map(corpus, removePunctuation)
+
+#remove commo english stop words
+corpus = tm_map(corpus, removeWords, c("the", "and", stopwords("english")))
+
+#strip whitespace
+corpus =  tm_map(corpus, stripWhitespace)
+
+#inspect first element 
+inspect(corpus[1])
+```
+
+```{r  warning=FALSE, message=FALSE}
+#convert corpus with clean text back to data frame and export into spreadsheet
+clean_twitter<-data.frame(text = sapply(corpus, as.character), stringsAsFactors = FALSE)
+clean_twitter$ID <- seq.int(nrow(clean_twitter))
+
+#join clean comments with urls on unique id created
+library(sqldf)
+
+clean_twitter_export<-sqldf("
+                            select
+                            a.ID ,
+                            a.text,
+                            b.type,
+                            b.wave, 
+                            b.post_url
+                            from clean_twitter a 
+                            join twitter_comments b 
+                            on (a.ID=b.ID)
+                            ")
+
+head(clean_twitter_export)
+
+write.table(clean_twitter_export, "c:/clean_twitter.txt", sep="\t")
+
+```
+
+##EDA on Text
+
+```{r warning=FALSE, message=FALSE}
+#convert to document term matrix and remove sparse terms
+review_dtm <- DocumentTermMatrix(corpus)
+review_dtm = removeSparseTerms(review_dtm, 0.99)
+
+#generate simple word cloud on the twitter comments 
+freq = data.frame(sort(colSums(as.matrix(review_dtm)), decreasing=TRUE))
+wordcloud(rownames(freq), freq[,1], max.words=50, colors=brewer.pal(1, "Dark2"))
+```
+
+```{r message=FALSE, warning=FALSE}
+#appy TF-IDF
+review_dtm_tfidf <- DocumentTermMatrix(corpus, control = list(weighting = weightTfIdf))
+review_dtm_tfidf = removeSparseTerms(review_dtm_tfidf, 0.95)
+
+#generate word cloud based on Tf-IDF
+freq = data.frame(sort(colSums(as.matrix(review_dtm_tfidf)), decreasing=TRUE))
+wordcloud(rownames(freq), freq[,1], max.words=100, colors=brewer.pal(1, "Dark2"))
+```
+
+
+##Sentiment Analysis 
+
+We will be using the syuzhet package to perform our analysis. The biggest advatage of this package is that it is built on top of a robust ground truth. An experiment was performed asking people to tag words with one of 8 emotions and overall sentiment such as positive or negative. In other words,the ground truth was collected using human intelligence. The lexicons are manually built from arbitrary texts. There were a total of 14k words classified by humans and built into the r package as ground truth. For more information, please see the following soruces:
+
+* http://saifmohammad.com/WebPages/NRC-Emotion-Lexicon.htm
+
+* http://sentiment.nrc.ca/lexicons-for-research/
+
+* https://cran.r-project.org/web/packages/syuzhet/vignettes/syuzhet-vignette.html
+
+```{r warning=FALSE, message=FALSE}
+#install_github('trinker/sentimentr')
+
+library(sentimentr)
+library(tidytext)  
+library("syuzhet")
+library("twitteR")
+
+```
+
+```{r warning=FALSE, message=FALSE}
+tweets.df <- subset(twitter_comments, select=c(comment) )
+
+tweets.df2 <- gsub("http.*","",tweets.df$comment)
+ 
+tweets.df2 <- gsub("https.*","",tweets.df2)
+ 
+tweets.df2 <- gsub("#.*","",tweets.df2)
+ 
+tweets.df2 <- gsub("@.*","",tweets.df2)
+
+
+```
+
+
+```{r warning=FALSE, message=FALSE}
+word.df <- as.vector(tweets.df2)
+ 
+emotion.df <- get_nrc_sentiment(word.df)
+ 
+emotion.df2 <- cbind(tweets.df2, emotion.df) 
+ 
+head(emotion.df2)
+```
+
+## Parse by Most Positive Comment 
+
+```{r warning=FALSE, message=FALSE}
+sent.value <- get_sentiment(word.df)
+ 
+most.positive <- word.df[sent.value == max(sent.value)]
+ 
+most.positive
+```
+
+## Parse by most Negative Comment
+
+```{r warning=FALSE, message=FALSE}
+most.negative <- word.df[sent.value <= min(sent.value)] 
+
+most.negative 
+```
+
+## Aggregate scores and display overall sentiment by comment 
+
+```{r warning=FALSE, message=FALSE}
+positive.tweets <- word.df[sent.value > 0]
+
+negative.tweets <- word.df[sent.value < 0]
+
+neutral.tweets <- word.df[sent.value == 0]
+
+# Alternate way to classify as Positive, Negative or Neutral tweets
+ 
+category_senti <- ifelse(sent.value < 0, "Negative", ifelse(sent.value > 0, "Positive", "Neutral"))
+ 
+category_senti2 <- cbind(twitter_comments,category_senti)
+
+#export results to txt file 
+write.table(category_senti2, "c:/clean_twitter_w_sentiment.txt", sep="\t")
+```
+
+
+
+## Visualize the distribution of sentiment by number of tweets 
+
+```{r warning=FALSE, message=FALSE}
+library(ggplot2)
+
+comment_viz<-sqldf("
+                   select 
+                   category_senti, count(distinct comment) as num_comments 
+                   from category_senti2
+                   group by category_senti
+                   ")
+
+ggplot(comment_viz, aes(x=reorder(category_senti,num_comments),round(num_comments, digits=2)))+ 
+  geom_bar(stat="identity", fill="deepskyblue3")+
+  geom_text(aes(label=round(num_comments, digits=2)), vjust=0.5, size=5, position=position_dodge(width = 1), hjust=1.5)+
+  theme_minimal()+
+  theme(axis.text.x=element_text(size=12, vjust=0.5))+
+  theme(axis.text.y=element_text(size=12, vjust=0.5))+
+  theme(plot.title = element_text(size=18))+
+  labs( x="Sentiment", y="Number of Comments")+
+  coord_flip()+
+  labs(caption="Twitter Comments from Custom Content Posts")+  
+  ggtitle("Distribution of Sentiment")
+
+
+```
+
+
+
+
+
+
+
